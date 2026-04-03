@@ -1,0 +1,40 @@
+# Node / frontend
+node_modules/
+dist/
+coverage/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Rust / Tauri
+target/
+src-tauri/target/
+src-core/target/
+native-bridge/target/
+
+# Swift / Xcode
+.build/
+.swiftpm/
+DerivedData/
+macos-host/build/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+
+# macOS
+.DS_Store
+*.app
+
+# Editor / IDE
+.idea/
+.vscode/
+
+.codex/
+docs/

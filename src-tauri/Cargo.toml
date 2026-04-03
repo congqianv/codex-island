@@ -1,0 +1,25 @@
+[package]
+name = "codex-island"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "codex_island_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0.3", features = [] }
+
+[dependencies]
+chrono = { version = "0.4.40", features = ["serde"] }
+codex-island-core = { path = "../src-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sysinfo = "0.33.1"
+tauri = { version = "2.3.1", features = ["macos-private-api"] }
+tokio = { version = "1.44.2", features = ["macros", "rt-multi-thread", "time", "sync"] }
+uuid = { version = "1.16.0", features = ["serde", "v4"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = "0.3.1"
+objc2-foundation = { version = "0.3.1", features = ["NSObject", "NSString", "NSUserNotification"] }

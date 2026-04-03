@@ -1,0 +1,29 @@
+{
+  "name": "codex-island",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "tauri": "tauri",
+    "native:host": "cargo build --manifest-path native-bridge/Cargo.toml && pkill -f CodexIslandHostApp >/dev/null 2>&1; swift run --package-path macos-host CodexIslandHostApp",
+    "build:host-app": "zsh ./scripts/build_macos_host_app.sh"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.4.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.4.0",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "@vitejs/plugin-react": "^5.0.1",
+    "typescript": "^5.8.3",
+    "vite": "^6.2.6",
+    "vitest": "^3.1.1"
+  }
+}
