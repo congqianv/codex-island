@@ -76,7 +76,7 @@ dependencies = [
 
 [[package]]
 name = "codex-island-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "objc2-app-kit",

@@ -849,15 +849,10 @@ fn focus_codex_desktop() -> Result<(), String> {
 
 fn focus_named_application(app_name: &str) -> Result<(), String> {
     let resolved_app_name = applescript_app_name(app_name);
+    let script = named_application_focus_script(resolved_app_name);
     let output = Command::new("osascript")
         .arg("-e")
-        .arg(format!(
-            r#"
-tell application "{resolved_app_name}"
-  activate
-end tell
-"#
-        ))
+        .arg(script)
         .output()
         .map_err(|error| error.to_string())?;
 
@@ -868,10 +863,29 @@ end tell
     }
 }
 
+fn named_application_focus_script(app_name: &str) -> String {
+    format!(
+        r#"
+tell application "{app_name}"
+  reopen
+  activate
+  try
+    repeat with w in windows
+      try
+        set miniaturized of w to false
+      end try
+    end repeat
+  end try
+end tell
+"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        applescript_app_name, applescript_string, iterm_focus_script, terminal_focus_script,
+        applescript_app_name, applescript_string, iterm_focus_script, named_application_focus_script,
+        terminal_focus_script,
         SubmitTransport,
     };
     use crate::models::{
@@ -1087,6 +1101,15 @@ mod tests {
         assert!(script.contains("set miniaturized of w to false"));
         assert!(script.contains("set frontmost of w to true"));
         assert!(script.contains("error \"TTY_NOT_FOUND\""));
+    }
+
+    #[test]
+    fn named_application_focus_script_restores_minimized_windows() {
+        let script = named_application_focus_script("Visual Studio Code");
+
+        assert!(script.contains("reopen"));
+        assert!(script.contains("set miniaturized of w to false"));
+        assert!(script.contains("activate"));
     }
 
     #[test]

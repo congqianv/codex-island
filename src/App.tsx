@@ -2,7 +2,6 @@ import { useDeferredValue, useEffect, useRef, useState } from "react";
 
 import {
   focusSessionOnHost,
-  openSessionProjectOnHost,
   syncIslandWindowOnHost
 } from "./hostBridge";
 import {
@@ -471,9 +470,9 @@ export function App() {
                       <button
                         className="session-row__icon-action"
                         type="button"
-                        aria-label="Open project folder"
+                        aria-label="Open session process"
                         onClick={() => {
-                          void openSessionProjectOnHost(host, session.session_id);
+                          void focusSessionOnHost(host, session.session_id);
                         }}
                       >
                         <SessionCodeIcon />
