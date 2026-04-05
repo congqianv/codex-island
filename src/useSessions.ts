@@ -2,6 +2,7 @@ import { startTransition, useEffect, useState } from "react";
 
 import { mockSessions } from "./mockSessions";
 import { detectHost, getSessionsFromHost, subscribeSessions } from "./hostBridge";
+import { mergeNativeSessionsPayload } from "./sessionPayloadMerge";
 import type { SessionsPayload } from "./types";
 
 const emptySessions: SessionsPayload = {
@@ -9,7 +10,10 @@ const emptySessions: SessionsPayload = {
   summary: {
     total: 0,
     running: 0,
+    idle: 0,
     waiting: 0,
+    discovering: 0,
+    failed: 0,
     completed: 0
   }
 };
@@ -26,7 +30,9 @@ export function useSessions() {
 
     void getSessionsFromHost(host).then((nextPayload) => {
       if (mounted) {
-        startTransition(() => setPayload(nextPayload));
+        startTransition(() =>
+          setPayload((current) => mergeNativeSessionsPayload(current, nextPayload))
+        );
       }
     });
 
@@ -35,7 +41,9 @@ export function useSessions() {
         return;
       }
 
-      startTransition(() => setPayload(nextPayload));
+      startTransition(() =>
+        setPayload((current) => mergeNativeSessionsPayload(current, nextPayload))
+      );
     }).then((dispose) => {
       unlisten = dispose;
     });

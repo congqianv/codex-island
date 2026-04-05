@@ -52,9 +52,21 @@ fn build_payload(sessions: Vec<CodexSession>) -> SessionsPayload {
             .iter()
             .filter(|session| matches!(session.status, SessionStatus::Running))
             .count(),
+        idle: sessions
+            .iter()
+            .filter(|session| matches!(session.status, SessionStatus::Idle))
+            .count(),
         waiting: sessions
             .iter()
             .filter(|session| matches!(session.status, SessionStatus::WaitingInput))
+            .count(),
+        discovering: sessions
+            .iter()
+            .filter(|session| matches!(session.status, SessionStatus::Discovering))
+            .count(),
+        failed: sessions
+            .iter()
+            .filter(|session| matches!(session.status, SessionStatus::Failed))
             .count(),
         completed: sessions
             .iter()

@@ -384,9 +384,6 @@ fn desktop_state_for_thread(
         rollout_attention,
         approval_request_id,
     );
-    if attention.is_none() && !is_recent {
-        return None;
-    }
     let interaction_hint = attention.as_ref().map(|pending| pending.prompt.clone());
     let prompt_actions = attention
         .as_ref()
@@ -404,8 +401,10 @@ fn desktop_state_for_thread(
         project_name: cwd_basename(&thread.cwd),
         activity_label: Some(if attention.is_some() {
             "Approval required".into()
-        } else {
+        } else if is_recent {
             "Working".into()
+        } else {
+            "Idle".into()
         }),
         interaction_hint,
         prompt_actions,
@@ -684,7 +683,7 @@ fn select_cli_thread_for_process(rows: Vec<ThreadRow>, process_start_unix_secs: 
 fn cli_state_from_sources(
     snapshot: Option<&str>,
     thread_hint: Option<PendingInput>,
-    _thread_exists: bool,
+    thread_exists: bool,
     thread_is_recent: bool,
 ) -> (
     Option<String>,
@@ -716,6 +715,8 @@ fn cli_state_from_sources(
                 .map(|_| "Approval required".to_string())
         })
         .or_else(|| thread_is_recent.then(|| "Working".to_string()))
+        .or_else(|| thread_exists.then(|| "Idle".to_string()))
+        .or_else(|| Some("Idle".to_string()))
         .filter(|label| looks_like_active_codex_status(label));
 
     (activity_label, interaction_hint, prompt_actions, prompt_source)
@@ -739,6 +740,7 @@ fn looks_like_active_codex_status(label: &str) -> bool {
         "executing",
         "compacting",
         "approval required",
+        "idle",
     ]
     .iter()
     .any(|candidate| lower.contains(candidate))
@@ -1399,7 +1401,7 @@ mod tests {
             true,
             false,
         );
-        assert!(activity_label.is_none());
+        assert_eq!(activity_label.as_deref(), Some("Idle"));
         assert!(interaction_hint.is_none());
         assert!(prompt_actions.is_empty());
         assert!(prompt_source.is_none());
@@ -1416,20 +1418,20 @@ mod tests {
     }
 
     #[test]
-    fn hides_idle_thread_when_terminal_snapshot_is_unavailable() {
+    fn keeps_idle_thread_visible_when_terminal_snapshot_is_unavailable() {
         let (activity_label, interaction_hint, prompt_actions, prompt_source) =
             cli_state_from_sources(None, None, true, false);
-        assert!(activity_label.is_none());
+        assert_eq!(activity_label.as_deref(), Some("Idle"));
         assert!(interaction_hint.is_none());
         assert!(prompt_actions.is_empty());
         assert!(prompt_source.is_none());
     }
 
     #[test]
-    fn hides_live_cli_process_without_snapshot_or_recent_thread() {
+    fn keeps_live_cli_process_visible_without_snapshot_or_recent_thread() {
         let (activity_label, interaction_hint, prompt_actions, prompt_source) =
             cli_state_from_sources(None, None, false, false);
-        assert!(activity_label.is_none());
+        assert_eq!(activity_label.as_deref(), Some("Idle"));
         assert!(interaction_hint.is_none());
         assert!(prompt_actions.is_empty());
         assert!(prompt_source.is_none());
@@ -1604,7 +1606,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_threads_without_attention_are_hidden_when_stale() {
+    fn desktop_threads_without_attention_fall_back_to_idle_when_stale() {
         let thread = ThreadRow {
             thread_id: "thread-1".into(),
             rollout_path: "/tmp/demo.rollout".into(),
@@ -1614,9 +1616,11 @@ mod tests {
             updated_at: 1,
         };
 
-        let state = desktop_state_for_thread(thread, None, None);
+        let state = desktop_state_for_thread(thread, None, None).expect("desktop state");
 
-        assert!(state.is_none());
+        assert_eq!(state.activity_label.as_deref(), Some("Idle"));
+        assert!(state.interaction_hint.is_none());
+        assert!(state.prompt_actions.is_empty());
     }
 
     #[test]

@@ -19,7 +19,7 @@ private let listBaseHeight: CGFloat = 108
 private let listRowHeight: CGFloat = 72
 private let listRowGap: CGFloat = 12
 private let listMaxHeight: CGFloat = 360
-private let detailHeight: CGFloat = 360
+private let detailHeight: CGFloat = 300
 private let emptyHeight: CGFloat = 280
 
 public func islandLayoutMetrics(

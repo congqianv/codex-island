@@ -22,9 +22,26 @@ pub enum TerminalApp {
 pub enum SessionStatus {
     Discovering,
     Running,
+    Idle,
     WaitingInput,
     Completed,
     Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionIngestionMode {
+    Hooks,
+    Fallback,
+}
+
+impl SessionIngestionMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Hooks => "hooks",
+            Self::Fallback => "fallback",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,10 +54,11 @@ pub enum PromptSource {
 impl SessionStatus {
     pub fn sort_priority(&self) -> u8 {
         match self {
-            Self::WaitingInput => 4,
-            Self::Running => 3,
-            Self::Discovering => 2,
-            Self::Failed => 1,
+            Self::WaitingInput => 5,
+            Self::Running => 4,
+            Self::Discovering => 3,
+            Self::Failed => 2,
+            Self::Idle => 1,
             Self::Completed => 0,
         }
     }
@@ -49,6 +67,7 @@ impl SessionStatus {
         match self {
             Self::Discovering => "discovering",
             Self::Running => "running",
+            Self::Idle => "idle",
             Self::WaitingInput => "waiting_input",
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -81,12 +100,54 @@ impl DiscoveryObservation {
                 Some(tty) => format!("cli:{tty}"),
                 None => format!("cli:{}", self.pid),
             },
-            SessionSource::Desktop => format!("desktop:{}", self.pid),
+            SessionSource::Desktop => {
+                if let Some(SubmitTarget::ThreadId(thread_id)) = &self.submit_target {
+                    return format!("thread:{thread_id}");
+                }
+                format!("desktop:{}", self.pid)
+            }
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionEvent {
+    pub session_id: String,
+    pub thread_id: Option<String>,
+    pub source: SessionSource,
+    pub pid: Option<i32>,
+    pub cwd: Option<String>,
+    pub tty: Option<String>,
+    pub terminal_app: Option<TerminalApp>,
+    pub title: Option<String>,
+    pub project_name: Option<String>,
+    pub activity_label: Option<String>,
+    pub prompt_text: Option<String>,
+    pub user_prompt: Option<String>,
+    pub prompt_actions: Vec<PromptAction>,
+    pub prompt_source: Option<PromptSource>,
+    pub submit_target: Option<SubmitTarget>,
+    pub status: SessionStatus,
+    pub transcript_path: Option<String>,
+    pub happened_at_unix_ms: i64,
+}
+
+impl SessionEvent {
+    pub fn session_key(&self) -> String {
+        if matches!(self.source, SessionSource::Cli) {
+            if let Some(tty) = self.tty.as_deref() {
+                return format!("cli:{tty}");
+            }
+        }
+
+        match &self.thread_id {
+            Some(thread_id) => format!("thread:{thread_id}"),
+            None => format!("hook:{}", self.session_id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CodexSession {
     pub session_id: String,
     pub source: SessionSource,
@@ -98,6 +159,7 @@ pub struct CodexSession {
     pub title: String,
     pub project_name: Option<String>,
     pub status: SessionStatus,
+    pub ingestion_mode: SessionIngestionMode,
     pub needs_attention: bool,
     pub last_activity_at: DateTime<Utc>,
     pub activity_label: Option<String>,
@@ -106,11 +168,21 @@ pub struct CodexSession {
     pub prompt_source: Option<PromptSource>,
     pub submit_target: Option<SubmitTarget>,
     pub notification_sent_at: Option<DateTime<Utc>>,
+    pub last_event_at: Option<DateTime<Utc>>,
+    pub last_observation_at: Option<DateTime<Utc>>,
+    pub transcript_path: Option<String>,
+    pub latest_user_prompt: Option<String>,
+    pub status_history: Vec<String>,
+    pub conversation_history: Vec<String>,
 }
 
 impl CodexSession {
     pub fn from_observation(observation: DiscoveryObservation, status: SessionStatus) -> Self {
         let needs_attention = matches!(status, SessionStatus::WaitingInput);
+        let status_entry = observation
+            .activity_label
+            .clone()
+            .unwrap_or_else(|| status_label_for_history(&status).to_string());
 
         Self {
             session_id: observation.session_id(),
@@ -123,6 +195,7 @@ impl CodexSession {
             title: observation.title,
             project_name: observation.project_name,
             status,
+            ingestion_mode: SessionIngestionMode::Fallback,
             needs_attention,
             last_activity_at: Utc
                 .timestamp_millis_opt(observation.seen_at_unix_ms)
@@ -134,6 +207,12 @@ impl CodexSession {
             prompt_source: observation.prompt_source,
             submit_target: observation.submit_target,
             notification_sent_at: None,
+            last_event_at: None,
+            last_observation_at: Utc.timestamp_millis_opt(observation.seen_at_unix_ms).single(),
+            transcript_path: None,
+            latest_user_prompt: None,
+            status_history: vec![status_entry],
+            conversation_history: vec![],
         }
     }
 }
@@ -157,6 +236,10 @@ pub struct SessionViewModel {
     pub prompt_text: Option<String>,
     pub action_options: Vec<PromptAction>,
     pub prompt_source: Option<PromptSource>,
+    pub latest_user_prompt: Option<String>,
+    pub status_history: Vec<String>,
+    pub conversation_history: Vec<String>,
+    pub ingestion_mode: SessionIngestionMode,
     pub terminal_label: String,
     pub relative_last_activity: String,
     pub last_activity_unix_ms: i64,
@@ -181,6 +264,7 @@ impl From<&CodexSession> for SessionViewModel {
             .unwrap_or_else(|| match session.status {
                 SessionStatus::WaitingInput => "Waiting for your input".into(),
                 SessionStatus::Running => "Working".into(),
+                SessionStatus::Idle => "Idle".into(),
                 SessionStatus::Discovering => "Connecting".into(),
                 SessionStatus::Completed => "Completed".into(),
                 SessionStatus::Failed => "Failed".into(),
@@ -219,6 +303,10 @@ impl From<&CodexSession> for SessionViewModel {
             prompt_text: session.last_snapshot.clone(),
             action_options: session.prompt_actions.clone(),
             prompt_source: session.prompt_source.clone(),
+            latest_user_prompt: session.latest_user_prompt.clone(),
+            status_history: session.status_history.clone(),
+            conversation_history: session.conversation_history.clone(),
+            ingestion_mode: session.ingestion_mode.clone(),
             terminal_label,
             relative_last_activity: relative_time_label(session.last_activity_at),
             last_activity_unix_ms: session.last_activity_at.timestamp_millis(),
@@ -230,7 +318,10 @@ impl From<&CodexSession> for SessionViewModel {
 pub struct SessionSummary {
     pub total: usize,
     pub running: usize,
+    pub idle: usize,
     pub waiting: usize,
+    pub discovering: usize,
+    pub failed: usize,
     pub completed: usize,
 }
 
@@ -247,7 +338,10 @@ impl SessionsPayload {
             summary: SessionSummary {
                 total: 0,
                 running: 0,
+                idle: 0,
                 waiting: 0,
+                discovering: 0,
+                failed: 0,
                 completed: 0,
             },
         }
@@ -266,6 +360,17 @@ fn relative_time_label(instant: DateTime<Utc>) -> String {
     }
 }
 
+pub fn status_label_for_history(status: &SessionStatus) -> &'static str {
+    match status {
+        SessionStatus::WaitingInput => "Waiting input",
+        SessionStatus::Running => "Running",
+        SessionStatus::Idle => "Idle",
+        SessionStatus::Discovering => "Discovering",
+        SessionStatus::Completed => "Completed",
+        SessionStatus::Failed => "Failed",
+    }
+}
+
 pub fn new_mock_sessions() -> Vec<SessionViewModel> {
     let now = Utc::now();
     [
@@ -280,6 +385,7 @@ pub fn new_mock_sessions() -> Vec<SessionViewModel> {
             title: "Refactor session store".into(),
             project_name: Some("codex-island".into()),
             status: SessionStatus::WaitingInput,
+            ingestion_mode: SessionIngestionMode::Fallback,
             needs_attention: true,
             last_activity_at: now,
             activity_label: Some("Continue with workspace-write approval?".into()),
@@ -288,6 +394,12 @@ pub fn new_mock_sessions() -> Vec<SessionViewModel> {
             prompt_source: Some(PromptSource::Thread),
             submit_target: None,
             notification_sent_at: None,
+            last_event_at: None,
+            last_observation_at: Some(now),
+            transcript_path: None,
+            latest_user_prompt: None,
+            status_history: vec!["Waiting input".into()],
+            conversation_history: vec![],
         },
         CodexSession {
             session_id: Uuid::new_v4().to_string(),
@@ -300,6 +412,7 @@ pub fn new_mock_sessions() -> Vec<SessionViewModel> {
             title: "Render landing page".into(),
             project_name: Some("launch-site".into()),
             status: SessionStatus::Running,
+            ingestion_mode: SessionIngestionMode::Fallback,
             needs_attention: false,
             last_activity_at: now - chrono::Duration::seconds(24),
             activity_label: Some("Updating island interactions".into()),
@@ -308,6 +421,12 @@ pub fn new_mock_sessions() -> Vec<SessionViewModel> {
             prompt_source: None,
             submit_target: None,
             notification_sent_at: None,
+            last_event_at: None,
+            last_observation_at: Some(now - chrono::Duration::seconds(24)),
+            transcript_path: None,
+            latest_user_prompt: None,
+            status_history: vec!["Running".into()],
+            conversation_history: vec![],
         },
     ]
     .iter()
@@ -322,8 +441,9 @@ mod tests {
     use crate::session_store::SessionStore;
 
     use super::{
-        CodexSession, DiscoveryObservation, PromptAction, PromptSource, SessionSource,
-        SessionStatus, SessionViewModel, SubmitTarget, TerminalApp,
+        CodexSession, DiscoveryObservation, PromptAction, PromptSource, SessionEvent,
+        SessionIngestionMode, SessionSource, SessionStatus, SessionViewModel, SubmitTarget,
+        TerminalApp,
     };
 
     #[test]
@@ -398,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn removes_missing_sessions_immediately() {
+    fn keeps_missing_sessions_without_auto_cleanup() {
         let mut store = SessionStore::default();
 
         store.ingest(vec![DiscoveryObservation {
@@ -421,8 +541,8 @@ mod tests {
         let changed = store.ingest(vec![]);
         let sessions = store.sessions();
 
-        assert!(changed);
-        assert!(sessions.is_empty());
+        assert!(!changed);
+        assert_eq!(sessions.len(), 1);
     }
 
     #[test]
@@ -438,6 +558,7 @@ mod tests {
             title: "CLI".into(),
             project_name: Some("alpha".into()),
             status: SessionStatus::WaitingInput,
+            ingestion_mode: SessionIngestionMode::Fallback,
             needs_attention: true,
             last_activity_at: Utc::now(),
             activity_label: Some("Approval required".into()),
@@ -446,6 +567,12 @@ mod tests {
             prompt_source: Some(PromptSource::Thread),
             submit_target: None,
             notification_sent_at: None,
+            last_event_at: None,
+            last_observation_at: Some(Utc::now()),
+            transcript_path: None,
+            latest_user_prompt: None,
+            status_history: vec!["Waiting input".into()],
+            conversation_history: vec![],
         };
         let cli_with_target = CodexSession {
             session_id: "cli:/dev/ttys002".into(),
@@ -458,6 +585,7 @@ mod tests {
             title: "CLI".into(),
             project_name: Some("beta".into()),
             status: SessionStatus::WaitingInput,
+            ingestion_mode: SessionIngestionMode::Fallback,
             needs_attention: true,
             last_activity_at: Utc::now(),
             activity_label: Some("Approval required".into()),
@@ -466,6 +594,12 @@ mod tests {
             prompt_source: Some(PromptSource::Thread),
             submit_target: Some(SubmitTarget::ThreadId("thread-123".into())),
             notification_sent_at: None,
+            last_event_at: None,
+            last_observation_at: Some(Utc::now()),
+            transcript_path: None,
+            latest_user_prompt: None,
+            status_history: vec!["Waiting input".into()],
+            conversation_history: vec![],
         };
         let desktop_with_target = CodexSession {
             session_id: "desktop:1".into(),
@@ -478,6 +612,7 @@ mod tests {
             title: "Desktop".into(),
             project_name: Some("alpha".into()),
             status: SessionStatus::WaitingInput,
+            ingestion_mode: SessionIngestionMode::Fallback,
             needs_attention: true,
             last_activity_at: Utc::now(),
             activity_label: Some("Approval required".into()),
@@ -486,6 +621,12 @@ mod tests {
             prompt_source: Some(PromptSource::Thread),
             submit_target: Some(SubmitTarget::ThreadId("desktop-thread".into())),
             notification_sent_at: None,
+            last_event_at: None,
+            last_observation_at: Some(Utc::now()),
+            transcript_path: None,
+            latest_user_prompt: None,
+            status_history: vec!["Waiting input".into()],
+            conversation_history: vec![],
         };
         let vscode = CodexSession {
             session_id: "cli:/dev/ttys002".into(),
@@ -498,6 +639,7 @@ mod tests {
             title: "VS Code".into(),
             project_name: Some("beta".into()),
             status: SessionStatus::WaitingInput,
+            ingestion_mode: SessionIngestionMode::Fallback,
             needs_attention: true,
             last_activity_at: Utc::now(),
             activity_label: Some("Approval required".into()),
@@ -506,6 +648,12 @@ mod tests {
             prompt_source: Some(PromptSource::Thread),
             submit_target: None,
             notification_sent_at: None,
+            last_event_at: None,
+            last_observation_at: Some(Utc::now()),
+            transcript_path: None,
+            latest_user_prompt: None,
+            status_history: vec!["Waiting input".into()],
+            conversation_history: vec![],
         };
 
         assert!(!SessionViewModel::from(&cli_without_target).can_reply);
@@ -556,6 +704,109 @@ mod tests {
         let sessions = store.sessions();
         assert_eq!(sessions[0].title, "Waiting");
         assert_eq!(sessions[1].title, "Running");
+    }
+
+    #[test]
+    fn sorts_most_recent_sessions_first_even_when_status_is_lower_priority() {
+        let mut store = SessionStore::default();
+
+        store.ingest(vec![
+            DiscoveryObservation {
+                pid: 201,
+                parent_pid: Some(100),
+                tty: Some("/dev/ttys001".into()),
+                cwd: Some("/tmp/alpha".into()),
+                terminal_app: Some(TerminalApp::Terminal),
+                title: "Older Waiting".into(),
+                project_name: Some("alpha".into()),
+                source: SessionSource::Cli,
+                activity_label: Some("Need confirmation".into()),
+                interaction_hint: Some("continue?".into()),
+                prompt_actions: vec![],
+                prompt_source: Some(PromptSource::Terminal),
+                seen_at_unix_ms: 1_000,
+                submit_target: None,
+            },
+            DiscoveryObservation {
+                pid: 301,
+                parent_pid: Some(100),
+                tty: Some("/dev/ttys002".into()),
+                cwd: Some("/tmp/beta".into()),
+                terminal_app: Some(TerminalApp::Terminal),
+                title: "Newer Running".into(),
+                project_name: Some("beta".into()),
+                source: SessionSource::Cli,
+                activity_label: Some("Applying patch".into()),
+                interaction_hint: None,
+                prompt_actions: vec![],
+                prompt_source: None,
+                seen_at_unix_ms: 2_000,
+                submit_target: None,
+            },
+        ]);
+
+        let sessions = store.sessions();
+        assert_eq!(sessions[0].title, "Newer Running");
+        assert_eq!(sessions[1].title, "Older Waiting");
+    }
+
+    #[test]
+    fn does_not_remove_hook_only_session_within_short_gap() {
+        let mut store = SessionStore::default();
+        let now = Utc::now().timestamp_millis();
+
+        store.ingest_event(SessionEvent {
+            session_id: "thread-keep".into(),
+            thread_id: Some("thread-keep".into()),
+            source: SessionSource::Cli,
+            pid: Some(404),
+            cwd: Some("/tmp/alpha".into()),
+            tty: Some("/dev/ttys009".into()),
+            terminal_app: Some(TerminalApp::Terminal),
+            title: Some("Hook only".into()),
+            project_name: Some("alpha".into()),
+            activity_label: Some("Running".into()),
+            prompt_text: None,
+            user_prompt: None,
+            prompt_actions: vec![],
+            prompt_source: None,
+            submit_target: Some(SubmitTarget::ThreadId("thread-keep".into())),
+            status: SessionStatus::Running,
+            transcript_path: None,
+            happened_at_unix_ms: now - 30_000,
+        });
+
+        let changed = store.ingest(vec![]);
+
+        assert!(!changed);
+        assert_eq!(store.sessions().len(), 1);
+    }
+
+    #[test]
+    fn keeps_missing_session_when_process_is_still_alive() {
+        let mut store = SessionStore::default();
+
+        store.ingest(vec![DiscoveryObservation {
+            pid: std::process::id() as i32,
+            parent_pid: None,
+            tty: Some("/dev/ttys999".into()),
+            cwd: Some("/tmp/alive".into()),
+            terminal_app: Some(TerminalApp::Terminal),
+            title: "Alive session".into(),
+            project_name: Some("alive".into()),
+            source: SessionSource::Cli,
+            activity_label: Some("Working".into()),
+            interaction_hint: None,
+            prompt_actions: vec![],
+            prompt_source: None,
+            seen_at_unix_ms: 1_000,
+            submit_target: None,
+        }]);
+
+        let changed = store.ingest(vec![]);
+
+        assert!(!changed);
+        assert_eq!(store.sessions().len(), 1);
     }
 
     #[test]
@@ -646,6 +897,7 @@ mod tests {
             title: "Desktop".into(),
             project_name: Some("alpha".into()),
             status: SessionStatus::WaitingInput,
+            ingestion_mode: SessionIngestionMode::Fallback,
             needs_attention: true,
             last_activity_at: Utc::now(),
             activity_label: Some("Approval required".into()),
@@ -665,6 +917,12 @@ mod tests {
             prompt_source: Some(PromptSource::Terminal),
             submit_target: Some(SubmitTarget::ThreadId("desktop-thread".into())),
             notification_sent_at: None,
+            last_event_at: None,
+            last_observation_at: Some(Utc::now()),
+            transcript_path: None,
+            latest_user_prompt: None,
+            status_history: vec!["Waiting input".into()],
+            conversation_history: vec![],
         };
 
         let view = SessionViewModel::from(&session);
@@ -706,5 +964,254 @@ mod tests {
             Some(SubmitTarget::ThreadId("thread-456".into()))
         );
         assert!(SessionViewModel::from(&session).can_reply);
+    }
+
+    #[test]
+    fn hook_event_creates_running_session_with_hooks_ingestion_mode() {
+        let mut store = SessionStore::default();
+
+        let changed = store.ingest_event(SessionEvent {
+            session_id: "thread-123".into(),
+            thread_id: Some("thread-123".into()),
+            source: SessionSource::Cli,
+            pid: Some(404),
+            cwd: Some("/tmp/alpha".into()),
+            tty: Some("/dev/ttys009".into()),
+            terminal_app: Some(TerminalApp::ITerm),
+            title: Some("alpha".into()),
+            project_name: Some("alpha".into()),
+            activity_label: Some("Running Bash".into()),
+            prompt_text: None,
+            user_prompt: None,
+            prompt_actions: vec![],
+            prompt_source: None,
+            submit_target: Some(SubmitTarget::ThreadId("thread-123".into())),
+            status: SessionStatus::Running,
+            transcript_path: Some("/tmp/rollout.jsonl".into()),
+            happened_at_unix_ms: 2_000,
+        });
+
+        let session = store.sessions().into_iter().next().expect("session");
+        assert!(changed);
+        assert_eq!(session.session_id, "cli:/dev/ttys009");
+        assert_eq!(session.status, SessionStatus::Running);
+        assert_eq!(session.ingestion_mode, SessionIngestionMode::Hooks);
+    }
+
+    #[test]
+    fn hook_event_promotes_existing_session_to_waiting_input() {
+        let mut store = SessionStore::default();
+
+        store.ingest(vec![DiscoveryObservation {
+            pid: 101,
+            parent_pid: Some(100),
+            tty: Some("/dev/ttys001".into()),
+            cwd: Some("/tmp/alpha".into()),
+            terminal_app: Some(TerminalApp::Terminal),
+            title: "Agent A".into(),
+            project_name: Some("alpha".into()),
+            source: SessionSource::Cli,
+            activity_label: Some("Planning changes".into()),
+            interaction_hint: None,
+            prompt_actions: vec![],
+            prompt_source: None,
+            seen_at_unix_ms: 1_000,
+            submit_target: Some(SubmitTarget::ThreadId("thread-123".into())),
+        }]);
+
+        let changed = store.ingest_event(SessionEvent {
+            session_id: "thread-123".into(),
+            thread_id: Some("thread-123".into()),
+            source: SessionSource::Cli,
+            pid: Some(101),
+            cwd: Some("/tmp/alpha".into()),
+            tty: Some("/dev/ttys001".into()),
+            terminal_app: Some(TerminalApp::Terminal),
+            title: Some("Agent A".into()),
+            project_name: Some("alpha".into()),
+            activity_label: Some("Approval required".into()),
+            prompt_text: Some("Continue?".into()),
+            user_prompt: None,
+            prompt_actions: vec![],
+            prompt_source: Some(PromptSource::Thread),
+            submit_target: Some(SubmitTarget::ThreadId("thread-123".into())),
+            status: SessionStatus::WaitingInput,
+            transcript_path: Some("/tmp/rollout.jsonl".into()),
+            happened_at_unix_ms: 2_000,
+        });
+
+        let session = store.sessions().into_iter().next().expect("session");
+        assert!(changed);
+        assert_eq!(session.status, SessionStatus::WaitingInput);
+        assert!(session.needs_attention);
+        assert_eq!(session.ingestion_mode, SessionIngestionMode::Hooks);
+    }
+
+    #[test]
+    fn recent_hook_event_wins_over_polling_status() {
+        let mut store = SessionStore::default();
+
+        store.ingest_event(SessionEvent {
+            session_id: "thread-123".into(),
+            thread_id: Some("thread-123".into()),
+            source: SessionSource::Cli,
+            pid: Some(101),
+            cwd: Some("/tmp/alpha".into()),
+            tty: Some("/dev/ttys001".into()),
+            terminal_app: Some(TerminalApp::Terminal),
+            title: Some("Agent A".into()),
+            project_name: Some("alpha".into()),
+            activity_label: Some("Running tool".into()),
+            prompt_text: None,
+            user_prompt: None,
+            prompt_actions: vec![],
+            prompt_source: None,
+            submit_target: Some(SubmitTarget::ThreadId("thread-123".into())),
+            status: SessionStatus::Running,
+            transcript_path: Some("/tmp/rollout.jsonl".into()),
+            happened_at_unix_ms: 10_000,
+        });
+
+        store.ingest(vec![DiscoveryObservation {
+            pid: 101,
+            parent_pid: Some(100),
+            tty: Some("/dev/ttys001".into()),
+            cwd: Some("/tmp/alpha".into()),
+            terminal_app: Some(TerminalApp::Terminal),
+            title: "Agent A".into(),
+            project_name: Some("alpha".into()),
+            source: SessionSource::Cli,
+            activity_label: Some("Continue?".into()),
+            interaction_hint: Some("Continue?".into()),
+            prompt_actions: vec![],
+            prompt_source: Some(PromptSource::Terminal),
+            seen_at_unix_ms: 10_500,
+            submit_target: Some(SubmitTarget::ThreadId("thread-123".into())),
+        }]);
+
+        let session = store.sessions().into_iter().next().expect("session");
+        assert_eq!(session.status, SessionStatus::Running);
+        assert_eq!(session.ingestion_mode, SessionIngestionMode::Hooks);
+    }
+
+    #[test]
+    fn stale_hook_event_falls_back_to_polling_status() {
+        let mut store = SessionStore::default();
+
+        store.ingest_event(SessionEvent {
+            session_id: "thread-123".into(),
+            thread_id: Some("thread-123".into()),
+            source: SessionSource::Cli,
+            pid: Some(101),
+            cwd: Some("/tmp/alpha".into()),
+            tty: Some("/dev/ttys001".into()),
+            terminal_app: Some(TerminalApp::Terminal),
+            title: Some("Agent A".into()),
+            project_name: Some("alpha".into()),
+            activity_label: Some("Running tool".into()),
+            prompt_text: None,
+            user_prompt: None,
+            prompt_actions: vec![],
+            prompt_source: None,
+            submit_target: Some(SubmitTarget::ThreadId("thread-123".into())),
+            status: SessionStatus::Running,
+            transcript_path: Some("/tmp/rollout.jsonl".into()),
+            happened_at_unix_ms: 1_000,
+        });
+
+        store.ingest(vec![DiscoveryObservation {
+            pid: 101,
+            parent_pid: Some(100),
+            tty: Some("/dev/ttys001".into()),
+            cwd: Some("/tmp/alpha".into()),
+            terminal_app: Some(TerminalApp::Terminal),
+            title: "Agent A".into(),
+            project_name: Some("alpha".into()),
+            source: SessionSource::Cli,
+            activity_label: Some("Continue?".into()),
+            interaction_hint: Some("Continue?".into()),
+            prompt_actions: vec![],
+            prompt_source: Some(PromptSource::Terminal),
+            seen_at_unix_ms: 80_000,
+            submit_target: Some(SubmitTarget::ThreadId("thread-123".into())),
+        }]);
+
+        let session = store.sessions().into_iter().next().expect("session");
+        assert_eq!(session.status, SessionStatus::WaitingInput);
+        assert_eq!(session.ingestion_mode, SessionIngestionMode::Fallback);
+    }
+
+    #[test]
+    fn keeps_last_ten_unique_status_history_entries() {
+        let mut store = SessionStore::default();
+
+        store.ingest_event(SessionEvent {
+            session_id: "thread-123".into(),
+            thread_id: Some("thread-123".into()),
+            source: SessionSource::Cli,
+            pid: Some(101),
+            cwd: Some("/tmp/alpha".into()),
+            tty: Some("/dev/ttys001".into()),
+            terminal_app: Some(TerminalApp::Terminal),
+            title: Some("Agent A".into()),
+            project_name: Some("alpha".into()),
+            activity_label: Some("State 1".into()),
+            prompt_text: None,
+            user_prompt: None,
+            prompt_actions: vec![],
+            prompt_source: None,
+            submit_target: Some(SubmitTarget::ThreadId("thread-123".into())),
+            status: SessionStatus::Running,
+            transcript_path: Some("/tmp/rollout.jsonl".into()),
+            happened_at_unix_ms: 1_000,
+        });
+        store.ingest_event(SessionEvent {
+            session_id: "thread-123".into(),
+            thread_id: Some("thread-123".into()),
+            source: SessionSource::Cli,
+            pid: Some(101),
+            cwd: Some("/tmp/alpha".into()),
+            tty: Some("/dev/ttys001".into()),
+            terminal_app: Some(TerminalApp::Terminal),
+            title: Some("Agent A".into()),
+            project_name: Some("alpha".into()),
+            activity_label: Some("State 1".into()),
+            prompt_text: None,
+            user_prompt: None,
+            prompt_actions: vec![],
+            prompt_source: None,
+            submit_target: Some(SubmitTarget::ThreadId("thread-123".into())),
+            status: SessionStatus::Running,
+            transcript_path: Some("/tmp/rollout.jsonl".into()),
+            happened_at_unix_ms: 1_100,
+        });
+
+        for index in 2..=12 {
+            store.ingest_event(SessionEvent {
+                session_id: "thread-123".into(),
+                thread_id: Some("thread-123".into()),
+                source: SessionSource::Cli,
+                pid: Some(101),
+                cwd: Some("/tmp/alpha".into()),
+                tty: Some("/dev/ttys001".into()),
+                terminal_app: Some(TerminalApp::Terminal),
+                title: Some("Agent A".into()),
+                project_name: Some("alpha".into()),
+                activity_label: Some(format!("State {index}")),
+                prompt_text: None,
+                user_prompt: None,
+                prompt_actions: vec![],
+                prompt_source: None,
+                submit_target: Some(SubmitTarget::ThreadId("thread-123".into())),
+                status: SessionStatus::Running,
+                transcript_path: Some("/tmp/rollout.jsonl".into()),
+                happened_at_unix_ms: 1_000 + (index as i64),
+            });
+        }
+
+        let session = store.sessions().into_iter().next().expect("session");
+        assert_eq!(session.status_history.len(), 10);
+        assert_eq!(session.status_history.first().map(String::as_str), Some("State 3"));
+        assert_eq!(session.status_history.last().map(String::as_str), Some("State 12"));
     }
 }

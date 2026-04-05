@@ -11,6 +11,7 @@ interface NativeHostBridge {
     sessionCount: number;
   }) => Promise<void>;
   focusSession?: (sessionId: string) => Promise<void>;
+  openSessionProject?: (sessionId: string) => Promise<void>;
   submitSessionReply?: (sessionId: string, reply: string) => Promise<void>;
   listenSessionsUpdated?: (listener: SessionsListener) => (() => void) | void;
 }
@@ -85,6 +86,22 @@ export async function focusSessionOnHost(host: HostKind, sessionId: string) {
       throw new Error("Native host bridge is missing focusSession");
     }
     await bridge.focusSession(sessionId);
+  }
+}
+
+export async function openSessionProjectOnHost(host: HostKind, sessionId: string) {
+  if (host === "tauri") {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("open_session_project", { sessionId });
+    return;
+  }
+
+  if (host === "native") {
+    const bridge = window.__CODEX_ISLAND_NATIVE__;
+    if (!bridge?.openSessionProject) {
+      throw new Error("Native host bridge is missing openSessionProject");
+    }
+    await bridge.openSessionProject(sessionId);
   }
 }
 

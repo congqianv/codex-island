@@ -29,7 +29,7 @@ const HOVER_EVENT: &str = "island:hover";
 const LIST_BASE_HEIGHT: u32 = 108;
 const LIST_ROW_HEIGHT: u32 = 72;
 const LIST_ROW_GAP: u32 = 12;
-const DETAIL_HEIGHT: u32 = 300;
+const DETAIL_HEIGHT: u32 = 600;
 const EMPTY_HEIGHT: u32 = 280;
 const LIST_MAX_HEIGHT: u32 = 360;
 
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn detail_and_empty_use_fixed_compact_heights() {
-        assert_eq!(expanded_height(ExpandedView::Detail, 5), 300);
+        assert_eq!(expanded_height(ExpandedView::Detail, 5), 600);
         assert_eq!(expanded_height(ExpandedView::Empty, 0), 280);
     }
 

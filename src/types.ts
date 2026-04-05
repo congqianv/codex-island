@@ -1,6 +1,7 @@
 export type SessionStatus =
   | "discovering"
   | "running"
+  | "idle"
   | "waiting_input"
   | "completed"
   | "failed";
@@ -12,6 +13,7 @@ export interface SessionActionOption {
 }
 
 export type PromptSource = "thread" | "terminal";
+export type SessionIngestionMode = "hooks" | "fallback";
 
 export interface SessionViewModel {
   session_id: string;
@@ -24,6 +26,10 @@ export interface SessionViewModel {
   prompt_text: string | null;
   action_options: SessionActionOption[];
   prompt_source: PromptSource | null;
+  latest_user_prompt?: string | null;
+  status_history?: string[];
+  conversation_history?: string[];
+  ingestion_mode: SessionIngestionMode;
   terminal_label: string;
   relative_last_activity: string;
   last_activity_unix_ms: number;
@@ -32,7 +38,10 @@ export interface SessionViewModel {
 export interface SessionSummary {
   total: number;
   running: number;
+  idle: number;
   waiting: number;
+  discovering: number;
+  failed: number;
   completed: number;
 }
 

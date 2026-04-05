@@ -1,5 +1,6 @@
 pub mod discovery;
 pub mod focus;
+pub mod hooks;
 pub mod models;
 pub mod notify;
 pub mod session_store;

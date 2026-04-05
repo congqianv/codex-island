@@ -3,6 +3,7 @@ import Foundation
 
 public final class AppDelegate: NSObject, NSApplicationDelegate {
     public var panel: IslandPanel?
+    private let nativeBridge = NativeCommandBridge()
 
     public override init() {
         super.init()
@@ -10,6 +11,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
         log("applicationDidFinishLaunching")
+        DispatchQueue.global(qos: .utility).async {
+            do {
+                try self.nativeBridge.ensureHooks()
+                self.log("managed hooks ensured")
+            } catch {
+                self.log("managed hooks ensure failed: \(error.localizedDescription)")
+            }
+        }
         panel = IslandPanel()
         panel?.positionOnPrimaryScreen()
         panel?.makeKeyAndOrderFront(nil)

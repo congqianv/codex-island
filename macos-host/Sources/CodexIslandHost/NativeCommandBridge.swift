@@ -38,12 +38,20 @@ final class NativeCommandBridge {
         try run(arguments: ["get-sessions"])
     }
 
+    func ensureHooks() throws {
+        _ = try run(arguments: ["ensure-hooks"])
+    }
+
     func focusSession(sessionId: String) throws {
         _ = try run(arguments: ["focus-session", sessionId])
     }
 
     func submitSessionReply(sessionId: String, reply: String) throws {
         _ = try run(arguments: ["submit-session-reply", sessionId, reply])
+    }
+
+    func openSessionProject(sessionId: String) throws {
+        _ = try run(arguments: ["open-session-project", sessionId])
     }
 
     private func run(arguments: [String]) throws -> String {

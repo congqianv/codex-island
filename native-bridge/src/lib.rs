@@ -1,23 +1,32 @@
 use codex_island_core::discovery::{CliSessionMonitor, SessionMonitor};
 use codex_island_core::focus::{
-    focus_session, reply_to_session, submit_session_reply_with_transport, LocalCodexSubmitTransport,
+    focus_session, open_session_project, reply_to_session, submit_session_reply_with_transport,
+    LocalCodexSubmitTransport,
 };
+use codex_island_core::hooks::{install_managed_hooks, read_cached_events};
 use codex_island_core::models::PromptSource;
 use codex_island_core::{AppSnapshot, CoreState};
 
 enum CliCommand {
+    EnsureHooks,
     GetSessions,
     FocusSession(String),
+    OpenSessionProject(String),
     SubmitSessionReply { session_id: String, reply: String },
 }
 
 pub fn run_cli(args: &[String]) -> Result<(), String> {
     match parse_command(args)? {
+        CliCommand::EnsureHooks => {
+            install_managed_hooks()?;
+            Ok(())
+        }
         CliCommand::GetSessions => {
             println!("{}", get_sessions_json()?);
             Ok(())
         }
         CliCommand::FocusSession(session_id) => focus_session_by_id(&session_id),
+        CliCommand::OpenSessionProject(session_id) => open_session_project_by_id(&session_id),
         CliCommand::SubmitSessionReply { session_id, reply } => {
             submit_session_reply_by_id(&session_id, &reply)
         }
@@ -36,18 +45,29 @@ pub fn submit_session_reply_by_id(session_id: &str, reply: &str) -> Result<(), S
     submit_session_reply_from_monitor(&CliSessionMonitor, session_id, reply)
 }
 
+pub fn open_session_project_by_id(session_id: &str) -> Result<(), String> {
+    open_session_project_from_monitor(&CliSessionMonitor, session_id)
+}
+
 pub fn snapshot_to_json(snapshot: &AppSnapshot) -> Result<String, String> {
     serde_json::to_string(snapshot).map_err(|error| error.to_string())
 }
 
 fn parse_command(args: &[String]) -> Result<CliCommand, String> {
     match args.get(1).map(String::as_str) {
+        Some("ensure-hooks") => Ok(CliCommand::EnsureHooks),
         Some("get-sessions") => Ok(CliCommand::GetSessions),
         Some("focus-session") => {
             let session_id = args
                 .get(2)
                 .ok_or_else(|| usage("focus-session requires a session id"))?;
             Ok(CliCommand::FocusSession(session_id.clone()))
+        }
+        Some("open-session-project") => {
+            let session_id = args
+                .get(2)
+                .ok_or_else(|| usage("open-session-project requires a session id"))?;
+            Ok(CliCommand::OpenSessionProject(session_id.clone()))
         }
         Some("submit-session-reply") => {
             let session_id = args
@@ -68,7 +88,7 @@ fn parse_command(args: &[String]) -> Result<CliCommand, String> {
 
 fn usage(reason: &str) -> String {
     format!(
-        "{reason}\nusage:\n  native-bridge get-sessions\n  native-bridge focus-session <session_id>\n  native-bridge submit-session-reply <session_id> <reply>"
+        "{reason}\nusage:\n  native-bridge ensure-hooks\n  native-bridge get-sessions\n  native-bridge focus-session <session_id>\n  native-bridge open-session-project <session_id>\n  native-bridge submit-session-reply <session_id> <reply>"
     )
 }
 
@@ -113,11 +133,26 @@ fn submit_session_reply_from_monitor<M: SessionMonitor>(
         .map_err(|error| error.to_string())
 }
 
+fn open_session_project_from_monitor<M: SessionMonitor>(
+    monitor: &M,
+    session_id: &str,
+) -> Result<(), String> {
+    let state = state_from_monitor(monitor);
+    let session = state
+        .focusable_session(session_id)
+        .ok_or_else(|| format!("session not found: {session_id}"))?;
+
+    open_session_project(&session)
+}
+
 fn state_from_monitor<M: SessionMonitor>(monitor: &M) -> CoreState {
     let state = CoreState::default();
     let observations = monitor.poll();
     let mut store = state.store.lock().expect("session store lock poisoned");
-    store.ingest(observations);
+    for event in read_cached_events() {
+        store.ingest_event(event);
+    }
+    store.ingest_observations(observations);
     drop(store);
     state
 }
@@ -125,7 +160,8 @@ fn state_from_monitor<M: SessionMonitor>(monitor: &M) -> CoreState {
 #[cfg(test)]
 mod tests {
     use codex_island_core::models::{
-        DiscoveryObservation, SessionSource, SessionStatus, SessionSummary, SessionViewModel,
+        DiscoveryObservation, SessionIngestionMode, SessionSource, SessionStatus, SessionSummary,
+        SessionViewModel,
         TerminalApp,
     };
 
@@ -153,6 +189,13 @@ mod tests {
     }
 
     #[test]
+    fn parses_ensure_hooks_command() {
+        let args = vec!["native-bridge".into(), "ensure-hooks".into()];
+
+        assert!(matches!(parse_command(&args), Ok(CliCommand::EnsureHooks)));
+    }
+
+    #[test]
     fn renders_snapshot_as_compact_json() {
         let payload = codex_island_core::AppSnapshot {
             sessions: vec![SessionViewModel {
@@ -166,6 +209,10 @@ mod tests {
                 prompt_text: None,
                 action_options: vec![],
                 prompt_source: None,
+                latest_user_prompt: None,
+                status_history: vec!["Running".into()],
+                conversation_history: vec![],
+                ingestion_mode: SessionIngestionMode::Fallback,
                 terminal_label: "Terminal".into(),
                 relative_last_activity: "just now".into(),
                 last_activity_unix_ms: 1_000,
@@ -173,7 +220,10 @@ mod tests {
             summary: SessionSummary {
                 total: 1,
                 running: 1,
+                idle: 0,
                 waiting: 0,
+                discovering: 0,
+                failed: 0,
                 completed: 0,
             },
         };

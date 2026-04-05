@@ -202,6 +202,23 @@ private final class NativeBridgeHandler: NSObject, WKScriptMessageHandler {
                     return "null"
                 }
             )
+        case "openSessionProject":
+            WebViewBridge.log("native bridge request: openSessionProject")
+            guard
+                let requestId = body["requestId"] as? String,
+                let payload = body["payload"] as? [String: Any],
+                let sessionId = payload["sessionId"] as? String
+            else {
+                WebViewBridge.log("native bridge open project payload invalid")
+                return
+            }
+            respond(
+                requestId: requestId,
+                command: {
+                    try self.commandBridge.openSessionProject(sessionId: sessionId)
+                    return "null"
+                }
+            )
         case "syncIslandWindow":
             guard
                 let payload = body["payload"] as? [String: Any],
@@ -324,6 +341,9 @@ public final class WebViewBridge {
               },
               submitSessionReply(sessionId, reply) {
                 return post("submitSessionReply", { sessionId, reply });
+              },
+              openSessionProject(sessionId) {
+                return post("openSessionProject", { sessionId });
               },
               syncIslandWindow(payload) {
                 window.webkit.messageHandlers.codexBridge.postMessage({

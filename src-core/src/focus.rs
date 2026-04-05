@@ -135,44 +135,10 @@ pub fn focus_session(session: &CodexSession) -> Result<(), String> {
         .map(|value| value.trim_start_matches("/dev/"));
 
     let script = match (session.terminal_app.as_ref(), tty) {
-        (Some(TerminalApp::Terminal), Some(tty)) => format!(
-            r#"
-tell application "Terminal"
-  activate
-  repeat with w in windows
-    repeat with t in tabs of w
-      try
-        if tty of t is "{tty}" then
-          set selected of t to true
-          set frontmost of w to true
-          return
-        end if
-      end try
-    end repeat
-  end repeat
-end tell
-"#
-        ),
-        (Some(TerminalApp::ITerm), Some(tty)) => format!(
-            r#"
-tell application "iTerm2"
-  activate
-  repeat with w in windows
-    repeat with t in tabs of w
-      repeat with s in sessions of t
-        try
-          if tty of s is "{tty}" then
-            select t
-            tell w to set current session of current tab to s
-            return
-          end if
-        end try
-      end repeat
-    end repeat
-  end repeat
-end tell
-"#
-        ),
+        (Some(TerminalApp::Terminal), Some(tty)) => terminal_focus_script(tty),
+        (Some(TerminalApp::ITerm), Some(tty)) => iterm_focus_script(tty),
+        (Some(TerminalApp::Terminal), None) => return focus_named_application("Terminal"),
+        (Some(TerminalApp::ITerm), None) => return focus_named_application("iTerm2"),
         (Some(TerminalApp::Unsupported(app_name)), _) => {
             return focus_named_application(app_name);
         }
@@ -188,7 +154,9 @@ end tell
     if output.status.success() {
         Ok(())
     } else {
-        focus_project_directory(session).map_err(|fallback_error| {
+        focus_terminal_application(session).or_else(|_| {
+            focus_project_directory(session)
+        }).map_err(|fallback_error| {
             let script_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
             if script_error.is_empty() {
                 fallback_error
@@ -197,6 +165,82 @@ end tell
             }
         })
     }
+}
+
+pub fn open_session_project(session: &CodexSession) -> Result<(), String> {
+    if matches!(session.source, crate::models::SessionSource::Desktop) {
+        return focus_codex_desktop();
+    }
+
+    let cwd = session
+        .cwd
+        .as_deref()
+        .ok_or_else(|| "Session has no project directory".to_string())?;
+
+    let output = Command::new("open")
+        .arg(cwd)
+        .output()
+        .map_err(|error| error.to_string())?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+fn terminal_focus_script(tty: &str) -> String {
+    format!(
+        r#"
+tell application "Terminal"
+  reopen
+  activate
+  repeat with w in windows
+    repeat with t in tabs of w
+      try
+        if tty of t is "{tty}" then
+          set miniaturized of w to false
+          set selected of t to true
+          set frontmost of w to true
+          return
+        end if
+      end try
+    end repeat
+  end repeat
+  error "TTY_NOT_FOUND"
+end tell
+"#
+    )
+}
+
+fn iterm_focus_script(tty: &str) -> String {
+    format!(
+        r#"
+tell application "iTerm2"
+  reopen
+  activate
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        try
+          if tty of s is "{tty}" then
+            set miniaturized of w to false
+            select t
+            tell w
+              set current tab to t
+              set current session of current tab to s
+              set frontmost to true
+            end tell
+            return
+          end if
+        end try
+      end repeat
+    end repeat
+  end repeat
+  error "TTY_NOT_FOUND"
+end tell
+"#
+    )
 }
 
 pub fn reply_to_session(session: &CodexSession, reply: &str) -> Result<(), String> {
@@ -768,14 +812,11 @@ fn focus_project_directory(session: &CodexSession) -> Result<(), String> {
         .ok_or_else(|| "Session has no project directory".to_string())?;
 
     let mut command = Command::new("open");
-    match session.terminal_app.as_ref() {
-        Some(TerminalApp::ITerm) => {
-            command.args(["-a", "iTerm"]);
-        }
-        _ => {
-            command.args(["-a", "Terminal"]);
-        }
-    }
+    let app_name = match session.terminal_app.as_ref() {
+        Some(TerminalApp::ITerm) => "iTerm",
+        _ => "Terminal",
+    };
+    command.args(["-a", app_name]);
 
     let output = command
         .arg(cwd)
@@ -783,9 +824,22 @@ fn focus_project_directory(session: &CodexSession) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
 
     if output.status.success() {
+        let _ = match session.terminal_app.as_ref() {
+            Some(TerminalApp::ITerm) => focus_named_application("iTerm2"),
+            _ => focus_named_application("Terminal"),
+        };
         Ok(())
     } else {
         Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+fn focus_terminal_application(session: &CodexSession) -> Result<(), String> {
+    match session.terminal_app.as_ref() {
+        Some(TerminalApp::ITerm) => focus_named_application("iTerm2"),
+        Some(TerminalApp::Terminal) => focus_named_application("Terminal"),
+        Some(TerminalApp::Unsupported(app_name)) => focus_named_application(app_name),
+        None => Err("Session host does not map to a known terminal application".to_string()),
     }
 }
 
@@ -816,8 +870,14 @@ end tell
 
 #[cfg(test)]
 mod tests {
-    use super::{applescript_app_name, applescript_string, SubmitTransport};
-    use crate::models::{CodexSession, SessionSource, SessionStatus, SubmitTarget, TerminalApp};
+    use super::{
+        applescript_app_name, applescript_string, iterm_focus_script, terminal_focus_script,
+        SubmitTransport,
+    };
+    use crate::models::{
+        CodexSession, SessionIngestionMode, SessionSource, SessionStatus, SubmitTarget,
+        TerminalApp,
+    };
 
     #[derive(Default)]
     struct FailingTransport;
@@ -866,6 +926,7 @@ mod tests {
             title: "Desktop".into(),
             project_name: Some("playground".into()),
             status: SessionStatus::WaitingInput,
+            ingestion_mode: SessionIngestionMode::Fallback,
             needs_attention: true,
             last_activity_at: chrono::Utc::now(),
             activity_label: Some("Needs input".into()),
@@ -874,6 +935,12 @@ mod tests {
             prompt_source: None,
             submit_target: None,
             notification_sent_at: None,
+            last_event_at: None,
+            last_observation_at: Some(chrono::Utc::now()),
+            transcript_path: None,
+            latest_user_prompt: None,
+            status_history: vec!["Waiting input".into()],
+            conversation_history: vec![],
         };
 
         let error = super::submit_session_reply_with_transport(&session, "yes", &FailingTransport)
@@ -896,6 +963,7 @@ mod tests {
             title: "CLI".into(),
             project_name: Some("playground".into()),
             status: SessionStatus::WaitingInput,
+            ingestion_mode: SessionIngestionMode::Fallback,
             needs_attention: true,
             last_activity_at: chrono::Utc::now(),
             activity_label: Some("Needs input".into()),
@@ -904,6 +972,12 @@ mod tests {
             prompt_source: None,
             submit_target: Some(SubmitTarget::ThreadId("thread-123".into())),
             notification_sent_at: None,
+            last_event_at: None,
+            last_observation_at: Some(chrono::Utc::now()),
+            transcript_path: None,
+            latest_user_prompt: None,
+            status_history: vec!["Waiting input".into()],
+            conversation_history: vec![],
         };
 
         let transport = RecordingTransport::default();
@@ -935,6 +1009,7 @@ mod tests {
             title: "Desktop".into(),
             project_name: Some("codex-island".into()),
             status: SessionStatus::WaitingInput,
+            ingestion_mode: SessionIngestionMode::Fallback,
             needs_attention: true,
             last_activity_at: chrono::Utc::now(),
             activity_label: Some("Needs input".into()),
@@ -943,6 +1018,12 @@ mod tests {
             prompt_source: None,
             submit_target: None,
             notification_sent_at: None,
+            last_event_at: None,
+            last_observation_at: Some(chrono::Utc::now()),
+            transcript_path: None,
+            latest_user_prompt: None,
+            status_history: vec!["Waiting input".into()],
+            conversation_history: vec![],
         };
 
         let result = super::focus_session(&session);
@@ -964,6 +1045,7 @@ mod tests {
             title: "CLI".into(),
             project_name: Some("codex-island".into()),
             status: SessionStatus::WaitingInput,
+            ingestion_mode: SessionIngestionMode::Fallback,
             needs_attention: true,
             last_activity_at: chrono::Utc::now(),
             activity_label: Some("Needs input".into()),
@@ -972,12 +1054,39 @@ mod tests {
             prompt_source: None,
             submit_target: None,
             notification_sent_at: None,
+            last_event_at: None,
+            last_observation_at: Some(chrono::Utc::now()),
+            transcript_path: None,
+            latest_user_prompt: None,
+            status_history: vec!["Waiting input".into()],
+            conversation_history: vec![],
         };
 
         let result = super::focus_session(&session);
         assert!(
             !matches!(result, Err(message) if message == "Session has no project directory")
         );
+    }
+
+    #[test]
+    fn iterm_focus_script_restores_minimized_windows() {
+        let script = iterm_focus_script("ttys001");
+
+        assert!(script.contains("reopen"));
+        assert!(script.contains("set miniaturized of w to false"));
+        assert!(script.contains("set current tab to t"));
+        assert!(script.contains("set frontmost to true"));
+        assert!(script.contains("error \"TTY_NOT_FOUND\""));
+    }
+
+    #[test]
+    fn terminal_focus_script_restores_minimized_windows() {
+        let script = terminal_focus_script("ttys001");
+
+        assert!(script.contains("reopen"));
+        assert!(script.contains("set miniaturized of w to false"));
+        assert!(script.contains("set frontmost of w to true"));
+        assert!(script.contains("error \"TTY_NOT_FOUND\""));
     }
 
     #[test]

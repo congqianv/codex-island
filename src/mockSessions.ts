@@ -13,6 +13,7 @@ export const mockSessions: SessionsPayload = {
       prompt_text: "Continue with file access approval?",
       action_options: [],
       prompt_source: "thread",
+      ingestion_mode: "fallback",
       terminal_label: "iTerm2",
       relative_last_activity: "just now",
       last_activity_unix_ms: 2_000
@@ -28,6 +29,7 @@ export const mockSessions: SessionsPayload = {
       prompt_text: null,
       action_options: [],
       prompt_source: null,
+      ingestion_mode: "fallback",
       terminal_label: "Terminal",
       relative_last_activity: "24s ago",
       last_activity_unix_ms: 1_000
@@ -36,7 +38,10 @@ export const mockSessions: SessionsPayload = {
   summary: {
     total: 2,
     running: 1,
+    idle: 0,
     waiting: 1,
+    discovering: 0,
+    failed: 0,
     completed: 0
   }
 };
